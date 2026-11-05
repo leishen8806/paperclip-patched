@@ -776,7 +776,8 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
     expect(circuitComments).toHaveLength(1);
     expect(circuitComments[0]?.body).toContain("automatic dependency wake circuit is open");
 
-    await heartbeat.reconcileResolvedDependencyWakes();
+    const afterCircuit = await heartbeat.reconcileResolvedDependencyWakes();
+    expect(afterCircuit.circuitOpenSkipped).toBe(1);
     expect(await db.select().from(issueComments).where(and(
       eq(issueComments.companyId, companyId),
       eq(issueComments.issueId, blockedIssueId),
