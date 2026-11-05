@@ -752,6 +752,14 @@ const createIssueBaseSchema = z.object({
         z.literal("board"),
       ]),
       action: multilineTextSchema.pipe(z.string().trim().min(1).max(2_000)),
+      externalWait: z
+        .object({
+          reason: multilineTextSchema.pipe(z.string().trim().min(1).max(2_000)),
+          reviewAt: z.string().datetime({ offset: true }).optional(),
+          reminderSentAt: z.string().datetime({ offset: true }).nullable().optional(),
+        })
+        .strict()
+        .optional(),
     })
     .strict()
     .optional()

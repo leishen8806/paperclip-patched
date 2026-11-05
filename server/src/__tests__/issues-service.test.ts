@@ -57,7 +57,12 @@ import {
 } from "../services/execution-workspace-policy.ts";
 import { buildAgentMentionHref, buildProjectMentionHref, MAX_ISSUE_REQUEST_DEPTH, type IssueWorkMode } from "@paperclipai/shared";
 
-const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
+import { resolveExternalTestDatabaseUrl } from "./helpers/external-test-database.js";
+
+const dependencyTestDatabaseUrl = resolveExternalTestDatabaseUrl("PAPERCLIP_ISSUE_DEPENDENCIES_TEST_DATABASE_URL");
+const embeddedPostgresSupport = dependencyTestDatabaseUrl
+  ? { supported: false, reason: "external dependency test database configured" }
+  : await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
 async function seedIssueCompany(db: ReturnType<typeof createDb>, companyId: string) {
@@ -4111,7 +4116,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
   });
 });
 
-describeEmbeddedPostgres("issueService blockers and dependency wake readiness", () => {
+(dependencyTestDatabaseUrl ? describe : describeEmbeddedPostgres)("issueService blockers and dependency wake readiness", () => {
   let db!: ReturnType<typeof createDb>;
   let svc!: ReturnType<typeof issueService>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
@@ -4291,6 +4296,76 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     expect(priorityUpdate?.changes).toEqual({
       priority: { from: "medium", to: "high" },
     });
+  });
+
+  it("clears external-wait parking on explicit clear, reassignment, dependency edits, and resume", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const blockerId = randomUUID();
+    const firstAgentId = randomUUID();
+    const secondAgentId = randomUUID();
+    await seedIssueCompany(db, companyId);
+    await seedCodexCoder(db, companyId, firstAgentId);
+    await db.insert(agents).values({
+      id: secondAgentId,
+      companyId,
+      name: "Reviewer",
+      role: "reviewer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const descriptor = {
+      owner: "board" as const,
+      action: "Wait for external counsel",
+      externalWait: {
+        reason: "Counsel must approve the legal copy",
+        reviewAt: "2026-11-19T00:00:00.000Z",
+        reminderSentAt: null,
+      },
+    };
+    await db.insert(issues).values([
+      {
+        id: issueId,
+        companyId,
+        title: "Parked legal review",
+        status: "blocked",
+        priority: "low",
+        assigneeAgentId: firstAgentId,
+        unblockDescriptor: descriptor,
+      },
+      {
+        id: blockerId,
+        companyId,
+        title: "New dependency",
+        status: "todo",
+        priority: "medium",
+      },
+    ]);
+
+    expect((await svc.update(issueId, { unblockDescriptor: null }))?.unblockDescriptor).toBeNull();
+    await db.update(issues).set({ unblockDescriptor: descriptor }).where(eq(issues.id, issueId));
+    expect((await svc.update(issueId, { assigneeAgentId: secondAgentId }))?.unblockDescriptor).toBeNull();
+    await db.update(issues).set({ unblockDescriptor: descriptor }).where(eq(issues.id, issueId));
+    expect((await svc.update(issueId, { blockedByIssueIds: [blockerId] }))?.unblockDescriptor).toBeNull();
+    await db.delete(issueRelations).where(eq(issueRelations.relatedIssueId, issueId));
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: blockerId,
+      relatedIssueId: issueId,
+      type: "blocks",
+    });
+    await db.update(issues).set({ unblockDescriptor: descriptor }).where(eq(issues.id, issueId));
+    expect((await svc.update(issueId, { blockedByIssueIds: [] }))?.unblockDescriptor).toBeNull();
+    await db.delete(issueRelations).where(eq(issueRelations.relatedIssueId, issueId));
+    await db.update(issues).set({
+      status: "blocked",
+      assigneeAgentId: secondAgentId,
+      unblockDescriptor: descriptor,
+    }).where(eq(issues.id, issueId));
+    expect((await svc.update(issueId, { status: "todo" }))?.unblockDescriptor).toBeNull();
   });
 
   it("persists blocked-by relations and exposes both blockedBy and blocks summaries", async () => {

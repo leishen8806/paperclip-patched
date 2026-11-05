@@ -1199,6 +1199,111 @@ describe("issue comment reopen routes", () => {
     );
   });
 
+  it("keeps a parked external wait blocked when the board patrol comments after 18 hours", async () => {
+    const issue = {
+      ...makeIssue("blocked"),
+      updatedAt: new Date(Date.now() - 18 * 60 * 60 * 1_000),
+      unblockDescriptor: {
+        owner: "board" as const,
+        action: "Wait for external counsel",
+        externalWait: {
+          reason: "External counsel must approve the legal copy",
+          reviewAt: new Date(Date.now() + 13 * 24 * 60 * 60 * 1_000).toISOString(),
+          reminderSentAt: null,
+        },
+      },
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+
+    const res = await request(await installActor(createApp()))
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .send({ body: "【阻塞巡检】已阻塞超过 18 小时，请重新确认下一步。" });
+
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+    expect(res.status).toBe(204);
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
+  it("records one board reminder when an external-wait review becomes due", async () => {
+    let issue = {
+      ...makeIssue("blocked"),
+      unblockDescriptor: {
+        owner: "board" as const,
+        action: "Wait for external counsel",
+        externalWait: {
+          reason: "External counsel must approve the legal copy",
+          reviewAt: new Date(Date.now() - 1_000).toISOString(),
+          reminderSentAt: null as string | null,
+        },
+      },
+    };
+    mockIssueService.getById.mockImplementation(async () => issue);
+    mockIssueService.getByIdForUpdate.mockImplementation(async () => issue);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, any>) => {
+      issue = { ...issue, ...patch };
+      return issue;
+    });
+    const app = await installActor(createApp());
+    const body = "【阻塞巡检】复查日期已到，请董事会确认是否继续等待。";
+
+    const first = await request(app)
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .send({ body });
+    const second = await request(app)
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .send({ body });
+
+    expect(first.status, JSON.stringify(first.body)).toBe(201);
+    expect(second.status).toBe(204);
+    expect(issue.status).toBe("blocked");
+    expect(issue.unblockDescriptor.externalWait.reminderSentAt).toEqual(expect.any(String));
+    expect(mockIssueService.addComment).toHaveBeenCalledTimes(1);
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    expect(mockLogActivity).toHaveBeenCalledTimes(1);
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.external_wait_review_due",
+        entityId: issue.id,
+      }),
+    );
+  });
+
+  it("restores normal reopen behavior when a human supplies external input", async () => {
+    const issue = {
+      ...makeIssue("blocked"),
+      unblockDescriptor: {
+        owner: "board" as const,
+        action: "Wait for external counsel",
+        externalWait: {
+          reason: "External counsel must approve the legal copy",
+          reviewAt: new Date(Date.now() + 13 * 24 * 60 * 60 * 1_000).toISOString(),
+          reminderSentAt: null,
+        },
+      },
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...issue,
+      ...patch,
+      unblockDescriptor: null,
+    }));
+
+    const res = await request(await installActor(createApp()))
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .send({ body: "Counsel approved the copy; please continue." });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockIssueService.update).toHaveBeenCalledWith(issue.id, { status: "todo" });
+    await waitForWakeup(() =>
+      expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+        issue.assigneeAgentId,
+        expect.objectContaining({ reason: "issue_reopened_via_comment" }),
+      ),
+    );
+  });
+
   it("moves in-progress issues with a scheduled retry back to todo via POST human comments", async () => {
     const issue = {
       ...makeIssue("in_progress"),

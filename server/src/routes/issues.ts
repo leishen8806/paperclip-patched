@@ -154,6 +154,7 @@ import {
   type IssueReviewPolicy,
   type IssueThreadInteractionCanonicalResolverPolicy,
   type IssueComment,
+  type IssueUnblockDescriptor,
   type IssueCommentPresentation,
   type IssueQueuedCommentQueue,
   type IssueWatchdogDiscoveryKind,
@@ -2173,6 +2174,34 @@ function isClosedIssueStatus(
   status: string | null | undefined,
 ): status is "done" | "cancelled" {
   return status === "done" || status === "cancelled";
+}
+
+const BLOCKED_PATROL_COMMENT_PREFIX = "【阻塞巡检】";
+const EXTERNAL_WAIT_DEFAULT_REVIEW_DAYS = 14;
+
+function externalWaitDescriptor(value: unknown) {
+  if (!value || typeof value !== "object") return null;
+  const descriptor = value as IssueUnblockDescriptor;
+  return descriptor.externalWait ? descriptor : null;
+}
+
+function normalizeExternalWaitDescriptor(
+  descriptor: IssueUnblockDescriptor,
+  now = new Date(),
+): IssueUnblockDescriptor {
+  if (!descriptor.externalWait) return descriptor;
+  return {
+    ...descriptor,
+    externalWait: {
+      reason: descriptor.externalWait.reason,
+      reviewAt:
+        descriptor.externalWait.reviewAt ??
+        new Date(
+          now.getTime() + EXTERNAL_WAIT_DEFAULT_REVIEW_DAYS * 24 * 60 * 60 * 1_000,
+        ).toISOString(),
+      reminderSentAt: null,
+    },
+  };
 }
 
 function shouldImplicitlyMoveCommentedIssueToTodo(input: {
@@ -12233,6 +12262,20 @@ export function issueRoutes(
         onboardingFirstTask: rawOnboardingFirstTask,
         ...rawCreateBody
       } = sanitizedBody;
+      if (rawCreateBody.unblockDescriptor?.externalWait) {
+        if (req.actor.type !== "board") {
+          throw forbidden("Only board users can park an external wait");
+        }
+        if (rawCreateBody.unblockDescriptor.owner !== "board" && "agentId" in rawCreateBody.unblockDescriptor.owner) {
+          throw unprocessable("External waits require a human or board owner");
+        }
+        if ((rawCreateBody.blockedByIssueIds?.length ?? 0) > 0) {
+          throw unprocessable("External waits cannot have task dependencies");
+        }
+        rawCreateBody.unblockDescriptor = normalizeExternalWaitDescriptor(
+          rawCreateBody.unblockDescriptor,
+        );
+      }
       // The onboarding first-task marker grants privileged, server-owned behavior:
       // it stamps the onboarding origin (which suppresses the seeded description in
       // the UI) and seeds a comment authored *as the assigned agent*. Honor it only
@@ -14141,7 +14184,23 @@ export function issueRoutes(
       if (updateFields.unblockDescriptor && nextStatus !== "blocked") {
         throw unprocessable("unblockDescriptor requires blocked status");
       }
-      const descriptor = updateFields.unblockDescriptor ?? null;
+      let descriptor = updateFields.unblockDescriptor ?? null;
+      if (descriptor?.externalWait) {
+        if (req.actor.type !== "board") {
+          throw forbidden("Only board users can park an external wait");
+        }
+        if (descriptor.owner !== "board" && "agentId" in descriptor.owner) {
+          throw unprocessable("External waits require a human or board owner");
+        }
+        const requestedBlockers = Array.isArray(req.body.blockedByIssueIds)
+          ? req.body.blockedByIssueIds
+          : (await svc.getDependencyReadiness(existing.id)).blockerIssueIds;
+        if (requestedBlockers.length > 0) {
+          throw unprocessable("External waits cannot have task dependencies");
+        }
+        descriptor = normalizeExternalWaitDescriptor(descriptor);
+        updateFields.unblockDescriptor = descriptor;
+      }
       if (descriptor && typeof descriptor === "object") {
         const owner = descriptor.owner;
         if (
@@ -18338,6 +18397,128 @@ export function issueRoutes(
         })
       )
         return;
+      if (req.actor.type === "board" && req.actor.userId && req.body.clientRequestId) {
+        const [accepted] = await db.select({ id: issueComments.id }).from(issueComments).where(and(
+          eq(issueComments.companyId, issue.companyId), eq(issueComments.issueId, issue.id),
+          eq(issueComments.authorUserId, req.actor.userId), eq(issueComments.clientRequestId, req.body.clientRequestId),
+        ));
+        if (accepted) {
+          const receipt = await svc.addComment(issue.id, req.body.body, { userId: req.actor.userId }, {
+            clientRequestId: req.body.clientRequestId, attachmentIds: req.body.attachmentIds,
+            authorType: "user",
+          });
+          const userId = req.actor.userId;
+          await completeIssueCommentReceipt(db, issueReferencesSvc, {
+            companyId: issue.companyId, issueId: issue.id, commentId: receipt.id,
+            activity: diff => ({
+              companyId: issue.companyId, actorType: "user", actorId: userId,
+              runId: receipt.createdByRunId,
+              responsibleUserIdOverride: receipt.onBehalfOfUserId ?? userId,
+              action: "issue.comment_added", entityType: "issue", entityId: issue.id,
+              details: {
+                commentId: receipt.id, bodySnippet: receipt.body.slice(0, 120),
+                identifier: issue.identifier, issueTitle: issue.title,
+                authorizationReason: commentAuthorizationReason, source: "comment_receipt_recovery",
+                ...summarizeIssueReferenceActivityDetails({
+                  addedReferencedIssues: diff.addedReferencedIssues.map(summarizeIssueRelationForActivity),
+                  removedReferencedIssues: diff.removedReferencedIssues.map(summarizeIssueRelationForActivity),
+                  currentReferencedIssues: diff.currentReferencedIssues.map(summarizeIssueRelationForActivity),
+                }),
+              },
+            }),
+          });
+          await externalObjectsSvc.syncCommentSafely(receipt.id);
+          res.status(201).json(receipt);
+          return;
+        }
+      }
+      if (!(await assertBoardCommentNotPaused(req, res, issue))) return;
+      const parkedDescriptor = externalWaitDescriptor(issue.unblockDescriptor);
+      const parkedExternalWait = parkedDescriptor?.externalWait;
+      const isBlockedPatrolComment =
+        req.actor.type === "board" &&
+        req.body.body.trimStart().startsWith(BLOCKED_PATROL_COMMENT_PREFIX);
+      if (
+        issue.status === "blocked" &&
+        parkedDescriptor &&
+        parkedExternalWait &&
+        isBlockedPatrolComment
+      ) {
+        const reviewAtMs = Date.parse(parkedExternalWait.reviewAt);
+        if (
+          parkedExternalWait.reminderSentAt ||
+          !Number.isFinite(reviewAtMs) ||
+          Date.now() < reviewAtMs
+        ) {
+          res.status(204).end();
+          return;
+        }
+        const actor = getActorInfo(req);
+        const reminder = await db.transaction(async (tx) => {
+          const locked = await svc.getByIdForUpdate(id, tx);
+          const lockedDescriptor = externalWaitDescriptor(
+            locked?.unblockDescriptor,
+          );
+          const lockedExternalWait = lockedDescriptor?.externalWait;
+          if (
+            locked?.status !== "blocked" ||
+            !lockedDescriptor ||
+            !lockedExternalWait ||
+            lockedExternalWait.reminderSentAt ||
+            Date.now() < Date.parse(lockedExternalWait.reviewAt)
+          ) {
+            return null;
+          }
+          const reminderSentAt = new Date().toISOString();
+          const updated = await svc.update(
+            id,
+            {
+              unblockDescriptor: {
+                ...lockedDescriptor,
+                externalWait: {
+                  ...lockedExternalWait,
+                  reminderSentAt,
+                },
+              },
+            },
+            tx,
+          );
+          if (!updated) throw notFound("Issue not found");
+          const comment = await svc.addComment(
+            id,
+            req.body.body,
+            { userId: actor.actorId },
+            {
+              authorType: "user",
+              authorizationReason: commentAuthorizationReason,
+            },
+            tx,
+          );
+          return { comment, reminderSentAt };
+        });
+        if (!reminder) {
+          res.status(204).end();
+          return;
+        }
+        await issueReferencesSvc.syncComment(reminder.comment.id);
+        await externalObjectsSvc.syncCommentSafely(reminder.comment.id);
+        await logActivity(db, {
+          companyId: issue.companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          action: "issue.external_wait_review_due",
+          entityType: "issue",
+          entityId: issue.id,
+          details: {
+            commentId: reminder.comment.id,
+            identifier: issue.identifier,
+            reviewAt: parkedExternalWait.reviewAt,
+            reminderSentAt: reminder.reminderSentAt,
+          },
+        });
+        res.status(201).json(reminder.comment);
+        return;
+      }
       const closedExecutionWorkspace =
         await getClosedIssueExecutionWorkspace(issue);
 

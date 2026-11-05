@@ -223,6 +223,38 @@ describe("issue validators", () => {
     ).toBe(false);
   });
 
+  it("validates external-wait parking metadata", () => {
+    expect(
+      updateIssueSchema.parse({
+        status: "blocked",
+        unblockDescriptor: {
+          owner: "board",
+          action: "Wait for external counsel",
+          externalWait: {
+            reason: "Counsel must approve the legal copy",
+            reviewAt: "2026-11-19T00:00:00.000Z",
+          },
+        },
+      }).unblockDescriptor,
+    ).toMatchObject({
+      owner: "board",
+      externalWait: {
+        reason: "Counsel must approve the legal copy",
+        reviewAt: "2026-11-19T00:00:00.000Z",
+      },
+    });
+    expect(
+      updateIssueSchema.safeParse({
+        status: "blocked",
+        unblockDescriptor: {
+          owner: "board",
+          action: "Wait for external counsel",
+          externalWait: { reason: "Counsel review", reviewAt: "not-a-date" },
+        },
+      }).success,
+    ).toBe(false);
+  });
+
   it("rejects invalid task-scoped network egress CIDRs", () => {
     expect(
       updateIssueSchema.safeParse({

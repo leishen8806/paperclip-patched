@@ -6100,6 +6100,33 @@ async function listIssueBlockedInboxAttentionMap(
       continue;
     }
 
+    const parkedExternalWait = row.unblockDescriptor?.externalWait;
+    if (row.status === "blocked" && parkedExternalWait) {
+      const owner = row.unblockDescriptor!.owner;
+      result.set(
+        row.id,
+        attentionBase({
+          state: "external_wait",
+          reason: "external_owner_action",
+          severity: "medium",
+          stoppedSinceAt: row.updatedAt,
+          owner:
+            owner === "board"
+              ? { type: "board", agentId: null, userId: null, label: "Board" }
+              : "userId" in owner
+                ? { type: "user", agentId: null, userId: owner.userId, label: null }
+                : { type: "external", agentId: null, userId: null, label: null },
+          action: {
+            label: "External wait",
+            detail: parkedExternalWait.reason,
+          },
+          sourceIssue: source,
+          externalDetailsRedacted: false,
+        }),
+      );
+      continue;
+    }
+
     const finding = findingByIssueId.get(row.id);
     if (finding) {
       const leaf =
@@ -10988,6 +11015,18 @@ export function issueService(db: Db) {
         patch.unblockDescriptor = null;
         patch.blockedTransitionAt = null;
         patch.blockedOwnerNotifiedAt = null;
+      }
+      if (
+        existing.status === "blocked" &&
+        existing.unblockDescriptor?.externalWait &&
+        issueData.unblockDescriptor === undefined &&
+        (blockedByIssueIds !== undefined ||
+          (issueData.assigneeAgentId !== undefined &&
+            issueData.assigneeAgentId !== existing.assigneeAgentId) ||
+          (issueData.assigneeUserId !== undefined &&
+            issueData.assigneeUserId !== existing.assigneeUserId))
+      ) {
+        patch.unblockDescriptor = null;
       }
       if (issueData.requestDepth !== undefined) {
         patch.requestDepth = clampIssueRequestDepth(issueData.requestDepth);

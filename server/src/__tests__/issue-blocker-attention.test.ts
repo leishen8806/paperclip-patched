@@ -101,6 +101,7 @@ describeEmbeddedPostgres("issue blocker attention", () => {
     originFingerprint?: string | null;
     executionState?: Record<string, unknown> | null;
     description?: string | null;
+    unblockDescriptor?: Issue["unblockDescriptor"];
   }) {
     const id = input.id ?? randomUUID();
     await db.insert(issues).values({
@@ -118,6 +119,7 @@ describeEmbeddedPostgres("issue blocker attention", () => {
       originFingerprint: input.originFingerprint ?? "default",
       executionState: input.executionState ?? null,
       description: input.description ?? null,
+      unblockDescriptor: input.unblockDescriptor ?? null,
     });
     return id;
   }
@@ -742,6 +744,38 @@ describeEmbeddedPostgres("issue blocker attention", () => {
     await expect(svc.list(companyId, { attention: "blocked", q: owner })).resolves.toEqual([]);
     await expect(svc.count(companyId, { attention: "blocked", q: action })).resolves.toBe(0);
     await expect(svc.count(companyId, { attention: "blocked", q: "Public context" })).resolves.toBe(1);
+  });
+
+  it("shows an explicit parked external wait and its board-approved reason", async () => {
+    const { companyId, agentId } = await createCompany("BIP");
+    const reason = "External counsel must approve the legal copy";
+    const issueId = await insertIssue({
+      companyId,
+      identifier: "BIP-1",
+      title: "Parked legal review",
+      status: "blocked",
+      assigneeAgentId: agentId,
+      unblockDescriptor: {
+        owner: "board",
+        action: "Wait for external counsel",
+        externalWait: {
+          reason,
+          reviewAt: "2026-11-19T00:00:00.000Z",
+          reminderSentAt: null,
+        },
+      },
+    });
+
+    const rows = await svc.list(companyId, { attention: "blocked" });
+    const issue = rows.find((row) => row.id === issueId);
+
+    expect(issue?.blockedInboxAttention).toMatchObject({
+      state: "external_wait",
+      reason: "external_owner_action",
+      owner: { type: "board", label: "Board" },
+      action: { label: "External wait", detail: reason },
+      redaction: { externalDetailsRedacted: false },
+    });
   });
 
   it("excludes healthy active blockers from blocked inbox attention", async () => {
