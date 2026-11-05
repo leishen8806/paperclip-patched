@@ -76,6 +76,11 @@ import { isRuntimeOwnedGitBranch } from "./execution-workspace-branch-ownership.
 import { logActivity } from "./activity-log.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 import { workspaceGitOperationScheduler } from "./workspace-git-operation-scheduler.js";
+import {
+  isGitWorktreeMutation,
+  retryGitWorktreeLock,
+  withGitWorktreeMutationLock,
+} from "./workspace-git-mutation-lock.js";
 import { classifyGitCloneFailure } from "./git-connection-failure.js";
 import { readWorkspaceBaseRefDiagnostic, type WorkspaceBaseRefDiagnostic } from "./workspace-base-ref-diagnostics.js";
 import {
@@ -3090,6 +3095,29 @@ async function runWorkspaceCommand(input: {
   );
 }
 
+async function runGitOperationWithLockRetry(args: string[], cwd: string) {
+  const run = () => retryGitWorktreeLock(async () => executeProcess({
+    command: "git",
+    args,
+    cwd,
+  }));
+  return isGitWorktreeMutation(args)
+    ? withGitWorktreeMutationLock(cwd, run)
+    : run();
+}
+
+function formatGitOperationFailure(
+  result: Awaited<ReturnType<typeof runGitOperationWithLockRetry>>,
+  input: { args: string[]; failureLabel?: string | null },
+) {
+  const details = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
+  const label = input.failureLabel ?? ("git " + input.args.join(" "));
+  const retrySuffix = result.retries > 0 ? " after " + result.retries + " lock retries" : "";
+  return details.length > 0
+    ? label + " failed" + retrySuffix + ": " + details
+    : label + " failed" + retrySuffix + " with exit code " + (result.code ?? -1);
+}
+
 async function recordGitOperation(
   recorder: WorkspaceOperationRecorder | null | undefined,
   input: {
@@ -3102,7 +3130,9 @@ async function recordGitOperation(
   },
 ): Promise<string> {
   if (!recorder) {
-    return runGit(input.args, input.cwd);
+    const result = await runGitOperationWithLockRetry(input.args, input.cwd);
+    if (result.code !== 0) throw new Error(formatGitOperationFailure(result, input));
+    return result.stdout.trim();
   }
 
   let stdout = "";
@@ -3114,29 +3144,30 @@ async function recordGitOperation(
     cwd: input.cwd,
     metadata: input.metadata ?? null,
     run: async () => {
-      const result = await executeProcess({
-        command: "git",
-        args: input.args,
-        cwd: input.cwd,
-      });
+      const result = await runGitOperationWithLockRetry(input.args, input.cwd);
       stdout = result.stdout;
       stderr = result.stderr;
       code = result.code;
+      if (result.code !== 0 && result.retries > 0) {
+        stderr += "\ngit worktree lock retries: " + result.retries;
+      }
       return {
         status: result.code === 0 ? "succeeded" : "failed",
         exitCode: result.code,
         stdout: result.stdout,
         stderr: result.stderr,
         system: result.code === 0 ? input.successMessage ?? null : null,
-        metadata:
-          result.stdoutTruncated || result.stderrTruncated
+        metadata: {
+          ...(result.stdoutTruncated || result.stderrTruncated
             ? {
                 stdoutTruncated: result.stdoutTruncated,
                 stderrTruncated: result.stderrTruncated,
                 stdoutBytes: result.stdoutBytes,
                 stderrBytes: result.stderrBytes,
               }
-            : null,
+            : {}),
+          ...(result.retries > 0 ? { gitLockRetries: result.retries } : {}),
+        },
       };
     },
   });
