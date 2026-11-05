@@ -132,6 +132,41 @@ describe("findExistingIssueBlockersResolvedWakeForReadyState", () => {
     expect(existing?.id).toBe("wake-cycle");
   });
 
+  it("suppresses a completed pre-statusVersion key for initial version zero", async () => {
+    const oldCycleKey = buildIssueBlockersResolvedWakeStateKey({
+      dependentIssueId,
+      blockerIssueIds: [blockerIssueId],
+      blockedTransitionAt: secondCycle,
+    });
+    const existing = await findExistingIssueBlockersResolvedWakeForReadyState(
+      dbWithWakes([{
+        id: "wake-pre-status-version-zero",
+        status: "completed",
+        idempotencyKey: oldCycleKey,
+        requestedAt: secondCycle,
+      }]),
+      { ...readyState, statusVersion: 0 },
+    );
+    expect(existing?.id).toBe("wake-pre-status-version-zero");
+  });
+
+  it("suppresses a completed no-cycle key for initial version zero", async () => {
+    const oldKey = buildIssueBlockersResolvedWakeStateKeyWithoutCycle({
+      dependentIssueId,
+      blockerIssueIds: [blockerIssueId],
+    });
+    const existing = await findExistingIssueBlockersResolvedWakeForReadyState(
+      dbWithWakes([{
+        id: "wake-old-versionless-zero",
+        status: "completed",
+        idempotencyKey: oldKey,
+        requestedAt: secondCycle,
+      }]),
+      { ...readyState, statusVersion: 0 },
+    );
+    expect(existing?.id).toBe("wake-old-versionless-zero");
+  });
+
   it("does not let a completed pre-statusVersion key suppress a new version", async () => {
     const oldCycleKey = buildIssueBlockersResolvedWakeStateKey({
       dependentIssueId,

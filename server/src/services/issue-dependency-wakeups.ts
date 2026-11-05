@@ -185,7 +185,7 @@ function wakeCoversIssueBlockersResolvedReadyState(
     oldStateKey: string;
     legacyKeys: Set<string>;
     blockedTransitionAt: Date | null;
-    usesStatusVersion: boolean;
+    statusVersion: number | undefined;
   },
 ): boolean {
   const idempotencyKey = wake.idempotencyKey;
@@ -196,12 +196,13 @@ function wakeCoversIssueBlockersResolvedReadyState(
   }
 
   if (idempotencyKey === keys.preStatusVersionCycleKey) {
-    return IN_FLIGHT_DEPENDENCY_WAKE_STATUS_SET.has(wake.status);
+    if (IN_FLIGHT_DEPENDENCY_WAKE_STATUS_SET.has(wake.status)) return true;
+    return keys.statusVersion === 0 && wake.status === "completed";
   }
 
   if (idempotencyKey === keys.oldStateKey) {
     if (IN_FLIGHT_DEPENDENCY_WAKE_STATUS_SET.has(wake.status)) return true;
-    if (keys.usesStatusVersion) return false;
+    if (keys.statusVersion !== undefined && keys.statusVersion !== 0) return false;
     if (wake.status !== "completed") return false;
     if (!keys.blockedTransitionAt) return true;
     return wake.requestedAt.getTime() >= keys.blockedTransitionAt.getTime();
@@ -283,7 +284,7 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
       oldStateKey,
       legacyKeys: new Set(legacyKeyList),
       blockedTransitionAt,
-      usesStatusVersion: input.statusVersion !== undefined,
+      statusVersion: input.statusVersion,
     }),
   );
   return covering ?? null;

@@ -749,7 +749,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       body: `Still waiting (${statusVersion})`,
     })));
     await db.update(issues).set({
-      statusVersion: 4,
+      status: "blocked",
       blockedTransitionAt: new Date("2026-08-01T12:04:00.000Z"),
     }).where(eq(issues.id, blockedIssueId));
     const opened = await heartbeat.reconcileResolvedDependencyWakes();
@@ -857,6 +857,11 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       .update(issues)
       .set({ assigneeAgentId: agentId, updatedAt: new Date() })
       .where(eq(issues.id, blockedIssueId));
+    const [reassignedIssue] = await db
+      .select({ statusVersion: issues.statusVersion })
+      .from(issues)
+      .where(eq(issues.id, blockedIssueId));
+    expect(reassignedIssue?.statusVersion).toBe(1);
 
     const afterAssignment = await heartbeat.reconcileResolvedDependencyWakes();
 
@@ -877,7 +882,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
         dependentIssueId: blockedIssueId,
         blockerIssueIds: [blockerIssueId],
-        statusVersion: 0,
+        statusVersion: reassignedIssue?.statusVersion,
       }),
     });
   });
