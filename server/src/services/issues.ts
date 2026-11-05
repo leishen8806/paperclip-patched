@@ -9233,6 +9233,7 @@ export function issueService(db: Db) {
           id: issues.id,
           assigneeAgentId: issues.assigneeAgentId,
           status: issues.status,
+          statusVersion: issues.statusVersion,
           blockedTransitionAt: issues.blockedTransitionAt,
         })
         .from(issueRelations)
@@ -9280,6 +9281,7 @@ export function issueService(db: Db) {
           id: candidate.id,
           assigneeAgentId: candidate.assigneeAgentId!,
           blockerIssueIds: readiness.blockerIssueIds,
+          statusVersion: candidate.statusVersion,
           blockedTransitionAt: candidate.blockedTransitionAt,
         }));
     },

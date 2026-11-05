@@ -1,3 +1,17 @@
+import { createHash } from "node:crypto";
+import { notifyScheduledRetryDispatch } from "../run-dispatch-notifications.js";
+import { notifyNativeEnvironmentSettlement } from "../native-environment-settlement-notifications.js";
+import { notifyExternalAgentSettlement } from "../../modules/external-agents/index.js";
+import { notifyNativeStatusReassessment } from "../native-status-reassessment-notifications.js";
+import { notifyUnsafeWorkspaceExportRecovery } from "../unsafe-workspace-export-notifications.js";
+import { notifyCancelledWorkspacePreservation } from "../cancelled-workspace-preservation-notifications.js";
+import { notifyInstructionCollection } from "../instruction-collection-notifications.js";
+import { notifyChatRunMilestones } from "../chat-run-milestone-notifications.js";
+import { boundRunIssueId } from "../run-task-binding.js";
+import { REMOTE_WORKSPACE_PREPARATION_TIMEOUT_CODE } from "../remote-workspace-transport.js";
+import { recoveryRunContextColumn, recoveryRunVersionColumn } from "./run-context-read.js";
+import { recoveryRunResultColumn } from "./run-result-read.js";
+import { readLegacyDispositionSource } from "./legacy-disposition-read.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { onboardingFirstTaskAwaitingUserSql } from "./onboarding-first-task-wait.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
@@ -64,6 +78,7 @@ import {
   issueApprovals,
   issueRecoveryActions,
   issueRelations,
+  issueWorkProducts,
   issueThreadInteractions,
   issues,
   nativeRunFinalizations,
@@ -189,6 +204,12 @@ const STRANDED_BOARD_ESCALATION_POLICY = "board_escalation_no_takeover_v1";
 const DISPOSITION_REPAIR_IDEMPOTENCY_INDEX =
   "agent_wakeup_requests_disposition_repair_idempotency_uq";
 const RESOLVED_DEPENDENCY_WAKE_BACKSTOP_CANDIDATE_LIMIT = 500;
+export const RESOLVED_DEPENDENCY_WAKE_BACKSTOP_CIRCUIT_THRESHOLD = Math.max(
+  1,
+  Number(process.env.RESOLVED_DEPENDENCY_WAKE_BACKSTOP_CIRCUIT_THRESHOLD) || 3,
+);
+const RESOLVED_DEPENDENCY_WAKE_BACKSTOP_CIRCUIT_ACTION =
+  "issue.blockers_resolved_wake_circuit_opened";
 
 // GGU-809: when a stranded `in_progress` issue would otherwise hit the
 // `isRepeatedProductiveContinuationRecovery` escalation path, exempt the
@@ -5721,6 +5742,8 @@ export function recoveryService(
       checked: 0,
       healed: 0,
       existingWakeSkipped: 0,
+      circuitOpened: 0,
+      circuitOpenSkipped: 0,
       selfBlockedSkipped: 0,
       livePathSkipped: 0,
       interactionSkipped: 0,
@@ -5765,7 +5788,9 @@ export function recoveryService(
             id: issues.id,
             companyId: issues.companyId,
             identifier: issues.identifier,
+            status: issues.status,
             assigneeAgentId: issues.assigneeAgentId,
+            statusVersion: issues.statusVersion,
             blockedTransitionAt: issues.blockedTransitionAt,
             totalCount: sql<number>`count(*) over()::int`,
           })
@@ -5781,7 +5806,9 @@ export function recoveryService(
           id: issues.id,
           companyId: issues.companyId,
           identifier: issues.identifier,
+          status: issues.status,
           assigneeAgentId: issues.assigneeAgentId,
+          statusVersion: issues.statusVersion,
           blockedTransitionAt: issues.blockedTransitionAt,
           totalCount: sql<number>`count(*) over()::int`,
         })
@@ -5875,6 +5902,7 @@ export function recoveryService(
         const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
           dependentIssueId: candidate.id,
           blockerIssueIds: readiness.blockerIssueIds,
+          statusVersion: candidate.statusVersion,
           blockedTransitionAt: candidate.blockedTransitionAt,
         });
         const existingWake =
@@ -5882,11 +5910,120 @@ export function recoveryService(
             companyId,
             dependentIssueId: candidate.id,
             blockerIssueIds: readiness.blockerIssueIds,
+            statusVersion: candidate.statusVersion,
             blockedTransitionAt: candidate.blockedTransitionAt,
           });
         if (existingWake) {
           result.existingWakeSkipped += 1;
           continue;
+        }
+
+        let backstopProgressFingerprint: string | null = null;
+        if (source === "issue_graph_liveness.backstop") {
+          const [blockers, workProducts] = await Promise.all([
+            db.select({ id: issues.id, status: issues.status, statusVersion: issues.statusVersion })
+              .from(issues)
+              .where(and(eq(issues.companyId, companyId), inArray(issues.id, readiness.blockerIssueIds)))
+              .orderBy(asc(issues.id)),
+            db.select({
+              id: issueWorkProducts.id,
+              type: issueWorkProducts.type,
+              provider: issueWorkProducts.provider,
+              externalId: issueWorkProducts.externalId,
+              status: issueWorkProducts.status,
+              reviewState: issueWorkProducts.reviewState,
+              updatedAt: issueWorkProducts.updatedAt,
+            })
+              .from(issueWorkProducts)
+              .where(and(
+                eq(issueWorkProducts.companyId, companyId),
+                eq(issueWorkProducts.issueId, candidate.id),
+              ))
+              .orderBy(asc(issueWorkProducts.id)),
+          ]);
+          backstopProgressFingerprint = `issue_blockers_resolved:v1:${createHash("sha256")
+            .update(JSON.stringify({
+              status: candidate.status,
+              assigneeAgentId: candidate.assigneeAgentId,
+              blockers,
+              workProducts,
+            }))
+            .digest("hex")}`;
+          const recentWakes = await db
+            .select({
+              fingerprint: sql<string | null>`${agentWakeupRequests.payload} ->> 'backstopProgressFingerprint'`,
+            })
+            .from(agentWakeupRequests)
+            .where(
+              and(
+                eq(agentWakeupRequests.companyId, companyId),
+                eq(agentWakeupRequests.reason, ISSUE_BLOCKERS_RESOLVED_WAKE_REASON),
+                isNotNull(agentWakeupRequests.runId),
+                sql`${agentWakeupRequests.payload} ->> 'issueId' = ${candidate.id}`,
+                sql`${agentWakeupRequests.payload} ->> 'backstop' = 'issue_graph_liveness_reconciliation'`,
+              ),
+            )
+            .orderBy(desc(agentWakeupRequests.requestedAt), desc(agentWakeupRequests.id))
+            .limit(RESOLVED_DEPENDENCY_WAKE_BACKSTOP_CIRCUIT_THRESHOLD);
+          if (
+            recentWakes.length === RESOLVED_DEPENDENCY_WAKE_BACKSTOP_CIRCUIT_THRESHOLD &&
+            recentWakes.every((wake) => wake.fingerprint === backstopProgressFingerprint)
+          ) {
+            const opened = await db.transaction(async (tx) => {
+              await tx.select({ id: issues.id }).from(issues)
+                .where(and(eq(issues.companyId, companyId), eq(issues.id, candidate.id)))
+                .for("update");
+              const existingCircuit = await tx.select({ id: activityLog.id }).from(activityLog)
+                .where(and(
+                  eq(activityLog.companyId, companyId),
+                  eq(activityLog.action, RESOLVED_DEPENDENCY_WAKE_BACKSTOP_CIRCUIT_ACTION),
+                  eq(activityLog.entityType, "issue"),
+                  eq(activityLog.entityId, candidate.id),
+                  sql`${activityLog.details} ->> 'fingerprint' = ${backstopProgressFingerprint}`,
+                ))
+                .limit(1)
+                .then((rows) => rows[0] ?? null);
+              if (existingCircuit) return false;
+              await issuesSvc.addComment(
+                candidate.id,
+                [
+                  "Paperclip's automatic dependency wake circuit is open after repeated wakes without a substantive task change.",
+                  "",
+                  `- Consecutive wakes: ${RESOLVED_DEPENDENCY_WAKE_BACKSTOP_CIRCUIT_THRESHOLD}`,
+                  "- Comments alone do not reset this circuit.",
+                  "- Automatic reset: change task status, assignee, dependencies, or a recorded work product/commit.",
+                  "- Board action: inspect the task and use an explicit manual retry if the unchanged state is intentionally ready.",
+                ].join("\n"),
+                {},
+                { authorType: "system" },
+                tx,
+              );
+              await logActivity(tx as unknown as Db, {
+                companyId,
+                actorType: "system",
+                actorId: "issue_graph_liveness_backstop",
+                agentId,
+                runId: opts?.runId ?? null,
+                action: RESOLVED_DEPENDENCY_WAKE_BACKSTOP_CIRCUIT_ACTION,
+                entityType: "issue",
+                entityId: candidate.id,
+                issueId: candidate.id,
+                details: {
+                  source,
+                  fingerprint: backstopProgressFingerprint,
+                  threshold: RESOLVED_DEPENDENCY_WAKE_BACKSTOP_CIRCUIT_THRESHOLD,
+                  statusVersion: candidate.statusVersion,
+                },
+              });
+              return true;
+            });
+            result.circuitOpenSkipped += 1;
+            if (opened) {
+              result.circuitOpened += 1;
+              result.issueIds.push(candidate.id);
+            }
+            continue;
+          }
         }
         // The assignee agent opened this blocked cycle itself, knowing its recorded
         // blockers were resolved: it is waiting on something outside the blocker
@@ -5932,6 +6069,7 @@ export function recoveryService(
               resolvedBlockerIssueId,
               blockerIssueIds: readiness.blockerIssueIds,
               backstop: payloadBackstop,
+              ...(backstopProgressFingerprint ? { backstopProgressFingerprint } : {}),
             },
             idempotencyKey,
             requestedByActorType: "system",

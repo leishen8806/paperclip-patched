@@ -15503,6 +15503,7 @@ export function issueRoutes(
           dependentIssueId: string;
           resolvedBlockerIssueId: string;
           blockerIssueIds: string[];
+          statusVersion: number;
           blockedTransitionAt?: Date | string | null;
           source: string;
           mutation: string;
@@ -15510,6 +15511,7 @@ export function issueRoutes(
           const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
             dependentIssueId: input.dependentIssueId,
             blockerIssueIds: input.blockerIssueIds,
+            statusVersion: input.statusVersion,
             blockedTransitionAt: input.blockedTransitionAt,
           });
           try {
@@ -15518,6 +15520,7 @@ export function issueRoutes(
                 companyId: issue.companyId,
                 dependentIssueId: input.dependentIssueId,
                 blockerIssueIds: input.blockerIssueIds,
+                statusVersion: input.statusVersion,
                 blockedTransitionAt: input.blockedTransitionAt,
               });
             if (existingWake) return;
@@ -15716,6 +15719,7 @@ export function issueRoutes(
               dependentIssueId: dependent.id,
               resolvedBlockerIssueId: issue.id,
               blockerIssueIds: dependent.blockerIssueIds,
+              statusVersion: dependent.statusVersion,
               blockedTransitionAt: dependent.blockedTransitionAt,
               source: "issue.blockers_resolved",
               mutation: "blocker_done",
@@ -15750,6 +15754,7 @@ export function issueRoutes(
               dependentIssueId: issue.id,
               resolvedBlockerIssueId,
               blockerIssueIds: readiness.blockerIssueIds,
+              statusVersion: issue.statusVersion,
               blockedTransitionAt: issue.blockedTransitionAt,
               source: "issue.blockers_restored",
               mutation: "blocked_dependency_restored",
@@ -19022,11 +19027,13 @@ export function issueRoutes(
           dependentIssueId: string;
           resolvedBlockerIssueId: string;
           blockerIssueIds: string[];
+          statusVersion: number;
           blockedTransitionAt?: Date | string | null;
         }) => {
           const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
             dependentIssueId: input.dependentIssueId,
             blockerIssueIds: input.blockerIssueIds,
+            statusVersion: input.statusVersion,
             blockedTransitionAt: input.blockedTransitionAt,
           });
           try {
@@ -19035,6 +19042,7 @@ export function issueRoutes(
                 companyId: currentIssue.companyId,
                 dependentIssueId: input.dependentIssueId,
                 blockerIssueIds: input.blockerIssueIds,
+                statusVersion: input.statusVersion,
                 blockedTransitionAt: input.blockedTransitionAt,
               });
             if (existingWake) return;
@@ -19199,6 +19207,7 @@ export function issueRoutes(
               dependentIssueId: dependent.id,
               resolvedBlockerIssueId: currentIssue.id,
               blockerIssueIds: dependent.blockerIssueIds,
+              statusVersion: dependent.statusVersion,
               blockedTransitionAt: dependent.blockedTransitionAt,
             });
           }

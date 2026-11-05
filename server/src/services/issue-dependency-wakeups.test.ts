@@ -66,6 +66,22 @@ describe("buildIssueBlockersResolvedWakeStateKey", () => {
     expect(first).not.toBe(second);
   });
 
+  it("changes when statusVersion changes", () => {
+    const first = buildIssueBlockersResolvedWakeStateKey({
+      dependentIssueId,
+      blockerIssueIds: [blockerIssueId],
+      blockedTransitionAt: firstCycle,
+      statusVersion: 7,
+    });
+    const second = buildIssueBlockersResolvedWakeStateKey({
+      dependentIssueId,
+      blockerIssueIds: [blockerIssueId],
+      blockedTransitionAt: firstCycle,
+      statusVersion: 8,
+    });
+    expect(first).not.toBe(second);
+  });
+
   it("hashes a null cycle as none and differs from any timestamp", () => {
     const noneKey = buildIssueBlockersResolvedWakeStateKey({
       dependentIssueId,
@@ -114,6 +130,41 @@ describe("findExistingIssueBlockersResolvedWakeForReadyState", () => {
       readyState,
     );
     expect(existing?.id).toBe("wake-cycle");
+  });
+
+  it("does not let a completed pre-statusVersion key suppress a new version", async () => {
+    const oldCycleKey = buildIssueBlockersResolvedWakeStateKey({
+      dependentIssueId,
+      blockerIssueIds: [blockerIssueId],
+      blockedTransitionAt: secondCycle,
+    });
+    const existing = await findExistingIssueBlockersResolvedWakeForReadyState(
+      dbWithWakes([{
+        id: "wake-pre-status-version",
+        status: "completed",
+        idempotencyKey: oldCycleKey,
+        requestedAt: secondCycle,
+      }]),
+      { ...readyState, statusVersion: 7 },
+    );
+    expect(existing).toBeNull();
+  });
+
+  it("does not let a completed no-cycle legacy key suppress a versioned state", async () => {
+    const oldKey = buildIssueBlockersResolvedWakeStateKeyWithoutCycle({
+      dependentIssueId,
+      blockerIssueIds: [blockerIssueId],
+    });
+    const existing = await findExistingIssueBlockersResolvedWakeForReadyState(
+      dbWithWakes([{
+        id: "wake-old-versionless",
+        status: "completed",
+        idempotencyKey: oldKey,
+        requestedAt: secondCycle,
+      }]),
+      { ...readyState, statusVersion: 7 },
+    );
+    expect(existing).toBeNull();
   });
 
   it("does not let a completed old-key wake from a previous blocked cycle suppress", async () => {

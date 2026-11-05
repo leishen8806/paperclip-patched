@@ -1,6 +1,6 @@
 import { EMBEDDED_POSTGRES_TEST_TIMEOUT_MS } from "@paperclipai/db";
 import { randomUUID } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, not, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -22,6 +22,7 @@ import {
   issueRecoveryActions,
   issueTreeHoldMembers,
   issueTreeHolds,
+  issueWorkProducts,
   issues,
   projects,
   projectWorkspaces,
@@ -670,6 +671,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       buildIssueBlockersResolvedWakeStateKey({
         dependentIssueId: blockedIssueId,
         blockerIssueIds: [blockerIssueId],
+        statusVersion: 0,
       }),
     );
     expect(["queued", "claimed", "completed"]).toContain(wake?.status);
@@ -683,6 +685,124 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       entityId: blockedIssueId,
       details: expect.objectContaining({ source: "issue_graph_liveness.backstop" }),
     });
+  });
+
+  it("opens one circuit after three comment-only resolved-dependency wakes", async () => {
+    const { companyId, agentId, blockedIssueId } =
+      await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+    const heartbeat = heartbeatService(db);
+    await db.update(issues).set({ statusVersion: 1 }).where(eq(issues.id, blockedIssueId));
+    await heartbeat.reconcileResolvedDependencyWakes();
+    await heartbeat.drainActiveRunExecutions();
+
+    const [firstWake] = await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, companyId),
+      eq(agentWakeupRequests.reason, "issue_blockers_resolved"),
+    ));
+    const fingerprint = firstWake?.payload?.backstopProgressFingerprint;
+    expect(typeof fingerprint).toBe("string");
+
+    const finishedAt = new Date();
+    await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt }).where(and(
+      eq(heartbeatRuns.companyId, companyId),
+      inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+    ));
+    await db.update(agentWakeupRequests).set({ status: "cancelled", finishedAt }).where(and(
+      eq(agentWakeupRequests.companyId, companyId),
+      not(eq(agentWakeupRequests.reason, "issue_blockers_resolved")),
+      inArray(agentWakeupRequests.status, ["queued", "claimed", "deferred_issue_execution"]),
+    ));
+    await db.update(issueRecoveryActions).set({ status: "resolved", resolvedAt: finishedAt }).where(and(
+      eq(issueRecoveryActions.companyId, companyId),
+      inArray(issueRecoveryActions.status, ["active", "escalated"]),
+    ));
+
+    const syntheticRuns = await db.insert(heartbeatRuns).values([2, 3].map((statusVersion) => ({
+      companyId,
+      agentId,
+      issueId: blockedIssueId,
+      status: "succeeded",
+      finishedAt: new Date(finishedAt.getTime() + statusVersion),
+      contextSnapshot: { issueId: blockedIssueId },
+    }))).returning();
+    await db.insert(agentWakeupRequests).values(syntheticRuns.map((run, index) => ({
+      companyId,
+      agentId,
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_blockers_resolved",
+      payload: {
+        issueId: blockedIssueId,
+        backstop: "issue_graph_liveness_reconciliation",
+        backstopProgressFingerprint: fingerprint,
+      },
+      status: "completed",
+      runId: run.id,
+      requestedAt: new Date(finishedAt.getTime() + index + 1),
+      finishedAt: run.finishedAt,
+      idempotencyKey: `circuit-history-${index + 2}`,
+    })));
+    await db.insert(issueComments).values([2, 3, 4].map((statusVersion) => ({
+      companyId,
+      issueId: blockedIssueId,
+      authorType: "agent" as const,
+      body: `Still waiting (${statusVersion})`,
+    })));
+    await db.update(issues).set({
+      statusVersion: 4,
+      blockedTransitionAt: new Date("2026-08-01T12:04:00.000Z"),
+    }).where(eq(issues.id, blockedIssueId));
+    const opened = await heartbeat.reconcileResolvedDependencyWakes();
+    expect(opened.circuitOpened).toBe(1);
+
+    const wakes = await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, companyId),
+      eq(agentWakeupRequests.reason, "issue_blockers_resolved"),
+    ));
+    expect(wakes).toHaveLength(3);
+
+    const circuitEvents = await db.select().from(activityLog).where(and(
+      eq(activityLog.companyId, companyId),
+      eq(activityLog.action, "issue.blockers_resolved_wake_circuit_opened"),
+    ));
+    expect(circuitEvents).toHaveLength(1);
+    expect(circuitEvents[0]?.details).toMatchObject({ threshold: 3 });
+
+    const circuitComments = await db.select().from(issueComments).where(and(
+      eq(issueComments.companyId, companyId),
+      eq(issueComments.issueId, blockedIssueId),
+      eq(issueComments.authorType, "system"),
+    ));
+    expect(circuitComments).toHaveLength(1);
+    expect(circuitComments[0]?.body).toContain("automatic dependency wake circuit is open");
+
+    await heartbeat.reconcileResolvedDependencyWakes();
+    expect(await db.select().from(issueComments).where(and(
+      eq(issueComments.companyId, companyId),
+      eq(issueComments.issueId, blockedIssueId),
+      eq(issueComments.authorType, "system"),
+    ))).toHaveLength(1);
+
+    await db.insert(issueWorkProducts).values({
+      companyId,
+      issueId: blockedIssueId,
+      type: "commit",
+      provider: "git",
+      externalId: "abc123",
+      title: "New implementation commit",
+      status: "ready",
+    });
+    await db.update(issues).set({
+      statusVersion: 5,
+      blockedTransitionAt: new Date("2026-08-01T12:05:00.000Z"),
+    }).where(eq(issues.id, blockedIssueId));
+    const afterWorkProduct = await heartbeat.reconcileResolvedDependencyWakes();
+    await heartbeat.drainActiveRunExecutions();
+    expect(afterWorkProduct.healed).toBe(1);
+    expect(await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, companyId),
+      eq(agentWakeupRequests.reason, "issue_blockers_resolved"),
+    ))).toHaveLength(4);
   });
 
   it("heals a blocked dependent whose done blocker has no workspace finalize obligation", async () => {
@@ -710,6 +830,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       buildIssueBlockersResolvedWakeStateKey({
         dependentIssueId: blockedIssueId,
         blockerIssueIds: [blockerIssueId],
+        statusVersion: 0,
       }),
     );
     expect(["queued", "claimed", "completed"]).toContain(wake?.status);
@@ -756,6 +877,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
         dependentIssueId: blockedIssueId,
         blockerIssueIds: [blockerIssueId],
+        statusVersion: 0,
       }),
     });
   });
@@ -871,6 +993,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
     const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
       dependentIssueId: blockedIssueId,
       blockerIssueIds: [blockerIssueId],
+      statusVersion: 0,
     });
     await db.insert(agentWakeupRequests).values({
       companyId,
@@ -954,6 +1077,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
         dependentIssueId: blockedIssueId,
         blockerIssueIds: [blockerIssueId],
+        statusVersion: 0,
       }),
     });
   });
@@ -1067,6 +1191,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
     const stateKey = buildIssueBlockersResolvedWakeStateKey({
       dependentIssueId: blockedIssueId,
       blockerIssueIds: readiness.blockerIssueIds,
+      statusVersion: 0,
     });
     const healedWake = await db
       .select({ status: agentWakeupRequests.status, idempotencyKey: agentWakeupRequests.idempotencyKey })
@@ -1126,6 +1251,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
     const cycleKey = buildIssueBlockersResolvedWakeStateKey({
       dependentIssueId: blockedIssueId,
       blockerIssueIds: [blockerIssueId],
+      statusVersion: 0,
       blockedTransitionAt,
     });
     const healedWake = await db

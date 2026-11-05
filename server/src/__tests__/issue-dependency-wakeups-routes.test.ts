@@ -229,6 +229,7 @@ describe("issue dependency wakeups in issue routes", () => {
         id: "issue-2",
         assigneeAgentId: "agent-2",
         blockerIssueIds: ["issue-1", "issue-3"],
+        statusVersion: 0,
       },
     ]);
 
@@ -258,6 +259,7 @@ describe("issue dependency wakeups in issue routes", () => {
       title: "Blocked after completion",
       description: null,
       status: "todo",
+      statusVersion: 0,
       priority: "medium",
       parentId: null,
       assigneeAgentId: "agent-2",
@@ -420,6 +422,7 @@ describe("issue dependency wakeups in issue routes", () => {
       title: "Issue",
       description: null,
       status: "todo",
+      statusVersion: 0,
       priority: "medium",
       parentId: null,
       assigneeAgentId: "agent-1",
@@ -455,6 +458,7 @@ describe("issue dependency wakeups in issue routes", () => {
         id: releaseIssueId,
         assigneeAgentId: "agent-release",
         blockerIssueIds: [reviewIssueId],
+        statusVersion: 0,
         blockedTransitionAt: releaseBlockedAt,
       },
     ]);
@@ -468,6 +472,7 @@ describe("issue dependency wakeups in issue routes", () => {
           companyId: "company-1",
           dependentIssueId: releaseIssueId,
           blockerIssueIds: [reviewIssueId],
+          statusVersion: 0,
           blockedTransitionAt: releaseBlockedAt,
         }),
       );
@@ -479,6 +484,7 @@ describe("issue dependency wakeups in issue routes", () => {
           idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
             dependentIssueId: releaseIssueId,
             blockerIssueIds: [reviewIssueId],
+            statusVersion: 0,
             blockedTransitionAt: releaseBlockedAt,
           }),
           payload: expect.objectContaining({
@@ -510,6 +516,7 @@ describe("issue dependency wakeups in issue routes", () => {
         id: "22222222-2222-4222-8222-222222222222",
         assigneeAgentId: "agent-release",
         blockerIssueIds: [reviewIssueId],
+        statusVersion: 0,
         blockedTransitionAt: new Date("2026-08-01T15:00:00.000Z"),
       },
     ]);
@@ -546,6 +553,7 @@ describe("issue dependency wakeups in issue routes", () => {
         id: releaseIssueId,
         assigneeAgentId: "agent-release",
         blockerIssueIds: [reviewIssueId],
+        statusVersion: 0,
         blockedTransitionAt: releaseBlockedAt,
       },
     ]);
@@ -561,6 +569,7 @@ describe("issue dependency wakeups in issue routes", () => {
         idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
           dependentIssueId: releaseIssueId,
           blockerIssueIds: [reviewIssueId],
+          statusVersion: 0,
           blockedTransitionAt: releaseBlockedAt,
         }),
       }),
@@ -588,6 +597,7 @@ describe("issue dependency wakeups in issue routes", () => {
         id: qaIssueId,
         assigneeAgentId: "agent-qa",
         blockerIssueIds: [releaseIssueId],
+        statusVersion: 0,
         blockedTransitionAt: qaBlockedAt,
       },
     ]);
@@ -606,6 +616,7 @@ describe("issue dependency wakeups in issue routes", () => {
         idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
           dependentIssueId: qaIssueId,
           blockerIssueIds: [releaseIssueId],
+          statusVersion: 0,
           blockedTransitionAt: qaBlockedAt,
         }),
       }),
@@ -667,6 +678,7 @@ describe("issue dependency wakeups in issue routes", () => {
           idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
             dependentIssueId: parentIssueId,
             blockerIssueIds: [childIssueId],
+            statusVersion: 0,
             blockedTransitionAt,
           }),
           payload: expect.objectContaining({

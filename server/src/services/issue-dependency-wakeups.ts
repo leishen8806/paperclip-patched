@@ -68,6 +68,7 @@ export type IssueBlockersResolvedReadyStateInput = {
   dependentIssueId: string;
   blockerIssueIds: string[];
   blockedTransitionAt?: IssueBlockersResolvedWakeCycleInput;
+  statusVersion?: number;
 };
 
 /**
@@ -144,18 +145,21 @@ export function buildIssueBlockersResolvedWakeStateKeyWithoutCycle(input: {
 /**
  * Level-triggered idempotency key. One key encodes the full set of blockers that
  * defines the current dependency-ready state plus the dependent's current
- * blocked cycle (`blockedTransitionAt`, or `none`). Two wakes for the same ready
- * state share the key. A wake from an earlier blocked cycle has a different
- * cycle stamp, so it produces a different key and never suppresses the current
- * wake. All three emit paths (route-time, finalize-time, periodic backstop) use
- * this key so they share one idempotency rule.
+ * blocked cycle (`blockedTransitionAt`, or `none`) and, when available, its
+ * `statusVersion`. Two wakes for the same ready state share the key. A wake from
+ * an earlier cycle or version has a different key and cannot suppress the
+ * current wake. All three emit paths (route-time, finalize-time, periodic
+ * backstop) use this key so they share one idempotency rule.
  */
 export function buildIssueBlockersResolvedWakeStateKey(input: IssueBlockersResolvedReadyStateInput) {
   const sortedBlockerIssueIds = uniqueSortedBlockerIssueIds(input.blockerIssueIds);
   const cycle = formatIssueBlockersResolvedWakeCycle(input.blockedTransitionAt);
+  const state = input.statusVersion === undefined
+    ? cycle
+    : `${cycle}\nstatusVersion:${input.statusVersion}`;
   return buildStateKey(
     input.dependentIssueId,
-    hashBlockerReadyStateDigest(sortedBlockerIssueIds, cycle),
+    hashBlockerReadyStateDigest(sortedBlockerIssueIds, state),
     sortedBlockerIssueIds.length,
   );
 }
@@ -177,9 +181,11 @@ function wakeCoversIssueBlockersResolvedReadyState(
   },
   keys: {
     cycleKey: string;
+    preStatusVersionCycleKey: string;
     oldStateKey: string;
     legacyKeys: Set<string>;
     blockedTransitionAt: Date | null;
+    usesStatusVersion: boolean;
   },
 ): boolean {
   const idempotencyKey = wake.idempotencyKey;
@@ -189,8 +195,13 @@ function wakeCoversIssueBlockersResolvedReadyState(
     return IDEMPOTENT_DEPENDENCY_WAKE_STATUS_SET.has(wake.status);
   }
 
+  if (idempotencyKey === keys.preStatusVersionCycleKey) {
+    return IN_FLIGHT_DEPENDENCY_WAKE_STATUS_SET.has(wake.status);
+  }
+
   if (idempotencyKey === keys.oldStateKey) {
     if (IN_FLIGHT_DEPENDENCY_WAKE_STATUS_SET.has(wake.status)) return true;
+    if (keys.usesStatusVersion) return false;
     if (wake.status !== "completed") return false;
     if (!keys.blockedTransitionAt) return true;
     return wake.requestedAt.getTime() >= keys.blockedTransitionAt.getTime();
@@ -225,9 +236,15 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
     dependentIssueId: string;
     blockerIssueIds: string[];
     blockedTransitionAt?: IssueBlockersResolvedWakeCycleInput;
+    statusVersion?: number;
   },
 ) {
   const cycleKey = buildIssueBlockersResolvedWakeStateKey(input);
+  const preStatusVersionCycleKey = buildIssueBlockersResolvedWakeStateKey({
+    dependentIssueId: input.dependentIssueId,
+    blockerIssueIds: input.blockerIssueIds,
+    blockedTransitionAt: input.blockedTransitionAt,
+  });
   const oldStateKey = buildIssueBlockersResolvedWakeStateKeyWithoutCycle(input);
   const legacyKeyList = [
     ...new Set(
@@ -241,7 +258,7 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
         ),
     ),
   ];
-  const lookupKeys = [...new Set([cycleKey, oldStateKey, ...legacyKeyList])];
+  const lookupKeys = [...new Set([cycleKey, preStatusVersionCycleKey, oldStateKey, ...legacyKeyList])];
   const blockedTransitionAt = parseWakeCycleDate(input.blockedTransitionAt);
 
   const rows = await db
@@ -262,9 +279,11 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
   const covering = rows.find((row) =>
     wakeCoversIssueBlockersResolvedReadyState(row, {
       cycleKey,
+      preStatusVersionCycleKey,
       oldStateKey,
       legacyKeys: new Set(legacyKeyList),
       blockedTransitionAt,
+      usesStatusVersion: input.statusVersion !== undefined,
     }),
   );
   return covering ?? null;
