@@ -8,6 +8,10 @@ import {
   runGitLockRetryForTests,
   withGitWorktreeMutationLockForTests,
 } from "../services/workspace-git-mutation-lock.ts";
+import {
+  gitLockRetryMetadata,
+  runGitOperationWithLockRetry,
+} from "../services/workspace-git-mutation-lock.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -22,7 +26,68 @@ async function createRepo() {
   return repo;
 }
 
+
 describe("same-repository git worktree mutation lock", () => {
+  it("uses the shared runtime git-operation path for eight real worktree adds and records retries", async () => {
+    const repo = await createRepo();
+    const root = path.join(repo, ".paperclip", "worktrees");
+    await fs.mkdir(root, { recursive: true });
+    await execFileAsync("git", ["branch", "-M", "main"], { cwd: repo });
+    await execFileAsync("git", ["remote", "add", "origin", repo], { cwd: repo });
+    await execFileAsync("git", ["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], { cwd: repo });
+    await execFileAsync("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], { cwd: repo });
+    const paths = Array.from({ length: 8 }, (_, index) => path.join(root, `real-${index}`));
+    let active = 0;
+    let maxActive = 0;
+    let attempts = 0;
+    try {
+      await Promise.all(paths.map((worktreePath, index) => runGitOperationWithLockRetry(
+        ["worktree", "add", "--track", "-b", `real-${index}`, worktreePath, "origin/main"],
+        repo,
+        async (args, cwd) => {
+          attempts += 1;
+          if (attempts === 1) return { stdout: "", stderr: "error: could not lock config file .git/config: File exists", code: 1 };
+          active += 1; maxActive = Math.max(maxActive, active);
+          try {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            const result = await execFileAsync("git", args, { cwd });
+            return { stdout: result.stdout, stderr: result.stderr, code: 0 };
+          } finally {
+            active -= 1;
+          }
+        },
+      )));
+      const listed = await execFileAsync("git", ["worktree", "list", "--porcelain"], { cwd: repo });
+      expect((listed.stdout.match(/^worktree /gm) ?? []).length).toBe(9);
+      expect(maxActive).toBe(1);
+      expect(gitLockRetryMetadata(1)).toEqual({ gitLockRetries: 1 });
+    } finally {
+      await Promise.all(paths.map((worktreePath) => execFileAsync("git", ["worktree", "remove", "--force", worktreePath], { cwd: repo }).catch(() => undefined)));
+      await fs.rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("fails after five fake lock retries with raw output through the shared runtime helper", async () => {
+    const repo = await createRepo();
+    let attempts = 0;
+    try {
+      const result = await runGitOperationWithLockRetry(
+        ["worktree", "add", "--track", "-b", "never", path.join(repo, "never"), "origin/main"],
+        repo,
+        async () => {
+          attempts += 1;
+          return { stdout: "", stderr: "error: could not lock config file .git/config: File exists", code: 1 };
+        },
+      );
+      expect(result.retries).toBe(5);
+      expect(result.exhausted).toBe(true);
+      expect(attempts).toBe(6);
+      expect(gitLockRetryMetadata(result.retries)).toEqual({ gitLockRetries: 5 });
+    } finally {
+      await fs.rm(repo, { recursive: true, force: true });
+    }
+  });
+
   it("serializes eight concurrent worktree creates and deletes", async () => {
     const repo = await createRepo();
     const root = path.join(repo, ".paperclip", "worktrees");

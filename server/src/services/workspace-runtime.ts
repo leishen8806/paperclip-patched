@@ -77,9 +77,8 @@ import { logActivity } from "./activity-log.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 import { workspaceGitOperationScheduler } from "./workspace-git-operation-scheduler.js";
 import {
-  isGitWorktreeMutation,
-  retryGitWorktreeLock,
-  withGitWorktreeMutationLock,
+  gitLockRetryMetadata,
+  runGitOperationWithLockRetry as runGitOperationWithLockRetryShared,
 } from "./workspace-git-mutation-lock.js";
 import { classifyGitCloneFailure } from "./git-connection-failure.js";
 import { readWorkspaceBaseRefDiagnostic, type WorkspaceBaseRefDiagnostic } from "./workspace-base-ref-diagnostics.js";
@@ -3096,14 +3095,11 @@ async function runWorkspaceCommand(input: {
 }
 
 async function runGitOperationWithLockRetry(args: string[], cwd: string) {
-  const run = () => retryGitWorktreeLock(async () => executeProcess({
+  return runGitOperationWithLockRetryShared(args, cwd, async (operationArgs, operationCwd) => executeProcess({
     command: "git",
-    args,
-    cwd,
+    args: operationArgs,
+    cwd: operationCwd,
   }));
-  return isGitWorktreeMutation(args)
-    ? withGitWorktreeMutationLock(cwd, run)
-    : run();
 }
 
 function formatGitOperationFailure(
@@ -3166,7 +3162,7 @@ async function recordGitOperation(
                 stderrBytes: result.stderrBytes,
               }
             : {}),
-          ...(result.retries > 0 ? { gitLockRetries: result.retries } : {}),
+          ...gitLockRetryMetadata(result.retries),
         },
       };
     },

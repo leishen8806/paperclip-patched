@@ -95,6 +95,22 @@ export function isGitWorktreeMutation(args: readonly string[]): boolean {
   return args.includes("branch") && (args.includes("-d") || args.includes("-D") || args.includes("--delete"));
 }
 
+/** Shared execution path used by workspace-runtime and its integration tests. */
+export async function runGitOperationWithLockRetry(
+  args: string[],
+  cwd: string,
+  run: (args: string[], cwd: string) => Promise<GitWorktreeProcessResult>,
+) {
+  const execute = () => retryGitWorktreeLock(() => run(args, cwd));
+  return isGitWorktreeMutation(args)
+    ? withGitWorktreeMutationLock(cwd, execute)
+    : execute();
+}
+
+export function gitLockRetryMetadata(retries: number): Record<string, number> {
+  return retries > 0 ? { gitLockRetries: retries } : {};
+}
+
 // Test seams keep the concurrency and bounded-retry contract executable without
 // importing the full server dependency graph.
 export const withGitWorktreeMutationLockForTests = withGitWorktreeMutationLock;
