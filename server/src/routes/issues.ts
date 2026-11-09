@@ -18402,43 +18402,12 @@ export function issueRoutes(
       const isBlockedPatrolComment =
         req.actor.type === "board" &&
         req.body.body.trimStart().startsWith(BLOCKED_PATROL_COMMENT_PREFIX);
-      const parkedPatrol = issue.status === "blocked" && parkedDescriptor && parkedExternalWait && isBlockedPatrolComment;
-      if (parkedPatrol && req.actor.userId && req.body.clientRequestId) {
-        const [accepted] = await db.select({ id: issueComments.id }).from(issueComments).where(and(
-          eq(issueComments.companyId, issue.companyId), eq(issueComments.issueId, issue.id),
-          eq(issueComments.authorUserId, req.actor.userId), eq(issueComments.clientRequestId, req.body.clientRequestId),
-        ));
-        if (accepted) {
-          const receipt = await svc.addComment(issue.id, req.body.body, { userId: req.actor.userId }, {
-            clientRequestId: req.body.clientRequestId, attachmentIds: req.body.attachmentIds,
-            authorType: "user",
-          });
-          const userId = req.actor.userId;
-          await completeIssueCommentReceipt(db, issueReferencesSvc, {
-            companyId: issue.companyId, issueId: issue.id, commentId: receipt.id,
-            activity: diff => ({
-              companyId: issue.companyId, actorType: "user", actorId: userId,
-              runId: receipt.createdByRunId,
-              responsibleUserIdOverride: receipt.onBehalfOfUserId ?? userId,
-              action: "issue.comment_added", entityType: "issue", entityId: issue.id,
-              details: {
-                commentId: receipt.id, bodySnippet: receipt.body.slice(0, 120),
-                identifier: issue.identifier, issueTitle: issue.title,
-                authorizationReason: commentAuthorizationReason, source: "comment_receipt_recovery",
-                ...summarizeIssueReferenceActivityDetails({
-                  addedReferencedIssues: diff.addedReferencedIssues.map(summarizeIssueRelationForActivity),
-                  removedReferencedIssues: diff.removedReferencedIssues.map(summarizeIssueRelationForActivity),
-                  currentReferencedIssues: diff.currentReferencedIssues.map(summarizeIssueRelationForActivity),
-                }),
-              },
-            }),
-          });
-          await externalObjectsSvc.syncCommentSafely(receipt.id);
-          res.status(201).json(receipt);
-          return;
-        }
-      }
-      if (parkedPatrol) {
+      if (
+        issue.status === "blocked" &&
+        parkedDescriptor &&
+        parkedExternalWait &&
+        isBlockedPatrolComment
+      ) {
         const reviewAtMs = Date.parse(parkedExternalWait.reviewAt);
         if (
           parkedExternalWait.reminderSentAt ||
