@@ -351,6 +351,7 @@ function createRunContextDb(
   runId: string = ownerRunId,
   chatBindings: Array<{ id: string; companyId: string; issueId: string; state: string }> = [],
   emptyWakeQueue = false,
+  blockedContract?: { userId: string },
 ) {
   const chatBindingQueries: ReturnType<PgDialect["sqlToQuery"]>[] = [];
   const runRows = Array.isArray(runAgentOrRows)
@@ -408,6 +409,13 @@ function createRunContextDb(
     transaction: async (callback: (tx: typeof dbStub) => Promise<unknown>) => callback(dbStub),
     select: vi.fn((selection: Record<string, unknown> = {}) => ({
       from: vi.fn((table: Parameters<typeof getTableName>[0]) => {
+        if (blockedContract && getTableName(table) === "issue_approvals") {
+          const query = { innerJoin: () => query, where: () => ({ limit: async () => [] }) };
+          return query;
+        }
+        if (blockedContract && getTableName(table) === "company_memberships") {
+          return { where: () => ({ limit: async () => [{ id: blockedContract.userId }] }) };
+        }
         if (getTableName(table) === "case_handoffs") return emptyCaseHandoffQuery();
         if (emptyWakeQueue && getTableName(table) === "agent_wakeup_requests") {
           return buildQuery({}, false, true);
@@ -1873,6 +1881,11 @@ describe("agent issue mutation checkout ownership", () => {
     const reviewAt = Date.parse(descriptor.externalWait.reviewAt);
     expect(reviewAt).toBeGreaterThanOrEqual(before + 14 * 24 * 60 * 60 * 1_000);
     expect(reviewAt).toBeLessThanOrEqual(Date.now() + 14 * 24 * 60 * 60 * 1_000);
+  });
+
+  const inboxBlockedActivity = (userId: string) => ({
+    status: "blocked",
+    unblockDescriptor: { owner: { userId }, action: "Review the QA inbox task before continuing." },
   });
 
   it.each(["bare blocked update", "human-owned inbox fixture"] as const)(

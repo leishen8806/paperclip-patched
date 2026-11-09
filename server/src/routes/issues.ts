@@ -14257,7 +14257,7 @@ export function issueRoutes(
       }
       const enteringBlocked =
         existing.status !== "blocked" && updateFields.status === "blocked";
-      if (enteringBlocked) {
+      if (enteringBlocked && !descriptor?.externalWait) {
         const requestedBlockerIds = Array.isArray(req.body.blockedByIssueIds)
           ? [...new Set(req.body.blockedByIssueIds as string[])]
           : null;
@@ -18397,7 +18397,13 @@ export function issueRoutes(
         })
       )
         return;
-      if (req.actor.type === "board" && req.actor.userId && req.body.clientRequestId) {
+      const parkedDescriptor = externalWaitDescriptor(issue.unblockDescriptor);
+      const parkedExternalWait = parkedDescriptor?.externalWait;
+      const isBlockedPatrolComment =
+        req.actor.type === "board" &&
+        req.body.body.trimStart().startsWith(BLOCKED_PATROL_COMMENT_PREFIX);
+      const parkedPatrol = issue.status === "blocked" && parkedDescriptor && parkedExternalWait && isBlockedPatrolComment;
+      if (parkedPatrol && req.actor.userId && req.body.clientRequestId) {
         const [accepted] = await db.select({ id: issueComments.id }).from(issueComments).where(and(
           eq(issueComments.companyId, issue.companyId), eq(issueComments.issueId, issue.id),
           eq(issueComments.authorUserId, req.actor.userId), eq(issueComments.clientRequestId, req.body.clientRequestId),
@@ -18432,18 +18438,7 @@ export function issueRoutes(
           return;
         }
       }
-      if (!(await assertBoardCommentNotPaused(req, res, issue))) return;
-      const parkedDescriptor = externalWaitDescriptor(issue.unblockDescriptor);
-      const parkedExternalWait = parkedDescriptor?.externalWait;
-      const isBlockedPatrolComment =
-        req.actor.type === "board" &&
-        req.body.body.trimStart().startsWith(BLOCKED_PATROL_COMMENT_PREFIX);
-      if (
-        issue.status === "blocked" &&
-        parkedDescriptor &&
-        parkedExternalWait &&
-        isBlockedPatrolComment
-      ) {
+      if (parkedPatrol) {
         const reviewAtMs = Date.parse(parkedExternalWait.reviewAt);
         if (
           parkedExternalWait.reminderSentAt ||
