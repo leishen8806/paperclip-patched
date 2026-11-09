@@ -33,7 +33,7 @@ jobs:
           echo "exit=${PIPESTATUS[0]}" | tee -a targeted.log
           node -e "const r=require('./targeted.json');console.log(JSON.stringify({files:r.numTotalTestSuites,tests:r.numTotalTests,passed:r.numPassedTests,failed:r.numFailedTests,skipped:r.numPendingTests+r.numTodoTests}))" | tee summary.json
           cat summary.json >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: results-${{ github.ref_name == 'main' && 'baseline' || 'patched' }}
@@ -66,7 +66,7 @@ jobs:
           cd ..
           node -e "const r=require('./server-${{ matrix.shard }}.json');const f=r.testResults.flatMap(t=>t.assertionResults.filter(a=>a.status==='failed').map(a=>t.name.split('/server/')[1]+' > '+a.fullName));console.log(JSON.stringify({shard:${{ matrix.shard }},tests:r.numTotalTests,passed:r.numPassedTests,failed:r.numFailedTests,skipped:r.numPendingTests,failedTests:f}))" | tee server-summary-${{ matrix.shard }}.json
           cat server-summary-${{ matrix.shard }}.json >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: server-${{ github.ref_name == 'main' && 'baseline' || 'patched' }}-${{ matrix.shard }}
