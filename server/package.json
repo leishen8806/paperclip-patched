@@ -148,7 +148,7 @@
     "typescript": "^7.0.2",
     "vite": "^8.2.2",
     "vitest": "^5.0.3",
-    "protobufjs": "7.6.6"
+    "protobufjs": "8.8.1"
   },
   "peerDependencies": {
     "@opentelemetry/auto-instrumentations-node": "0.79.0",
