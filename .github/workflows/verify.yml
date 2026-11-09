@@ -1,0 +1,52 @@
+name: verify-patchset
+on:
+  push:
+    branches: [main, task/upgrade-patchset]
+  workflow_dispatch:
+jobs:
+  targeted:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
+      - name: Targeted tests (patched areas)
+        run: |
+          set +e
+          npx vitest run \
+            packages/shared/src/validators/issue.test.ts \
+            server/src/__tests__/heartbeat-issue-liveness-escalation.test.ts \
+            server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts \
+            server/src/__tests__/issue-blocker-attention.test.ts \
+            server/src/__tests__/issue-comment-reopen-routes.test.ts \
+            server/src/__tests__/issue-dependency-wakeups-routes.test.ts \
+            server/src/__tests__/issues-service.test.ts \
+            server/src/__tests__/worktree-create-lock.test.ts \
+            server/src/services/issue-dependency-wakeups.test.ts \
+            --reporter=default --reporter=json --outputFile=targeted.json 2>&1 | tee targeted.log
+          echo "exit=${PIPESTATUS[0]}" | tee -a targeted.log
+          node -e "const r=require('./targeted.json');console.log(JSON.stringify({files:r.numTotalTestSuites,tests:r.numTotalTests,passed:r.numPassedTests,failed:r.numFailedTests,skipped:r.numPendingTests+r.numTodoTests}))" | tee summary.json
+          cat summary.json >> "$GITHUB_STEP_SUMMARY"
+      - name: Server suite
+        run: |
+          set +e
+          pnpm --filter @paperclipai/server exec vitest run --reporter=json --outputFile=../server.json > server.log 2>&1
+          echo "exit=$?" >> server.log
+          node -e "const r=require('./server.json');console.log(JSON.stringify({tests:r.numTotalTests,passed:r.numPassedTests,failed:r.numFailedTests,skipped:r.numPendingTests,failedFiles:r.testResults.filter(t=>t.status==='failed').map(t=>t.name.split('/server/')[1])}))" | tee server-summary.json
+          cat server-summary.json >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ github.ref_name == 'main' && 'baseline' || 'patched' }}
+          path: |
+            targeted.log
+            targeted.json
+            summary.json
+            server.log
+            server-summary.json
