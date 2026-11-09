@@ -1,0 +1,22 @@
+name: build-check
+on:
+  push:
+    branches: ['build-*']
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: protocol manifest check
+        run: node packages/paperclip-runner/scripts/generate-protocol-manifest.mjs --check 2>&1 | tail -20; echo "manifest_exit=${PIPESTATUS[0]}"
+      - name: full build
+        run: pnpm build 2>&1 | tail -60; echo "build_exit=${PIPESTATUS[0]}"
+      - name: migration list
+        run: ls packages/db/src/migrations/*.sql | wc -l; ls packages/db/src/migrations/*.sql | tail -3; file packages/db/src/migrations/0034_*.sql
