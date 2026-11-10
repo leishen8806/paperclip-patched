@@ -1,7 +1,4 @@
 import { createHash } from "node:crypto";
-import { notifyNativeStatusReassessment } from "../native-status-reassessment-notifications.js";
-import { boundRunIssueId } from "../run-task-binding.js";
-import { REMOTE_WORKSPACE_PREPARATION_TIMEOUT_CODE } from "../remote-workspace-transport.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { onboardingFirstTaskAwaitingUserSql } from "./onboarding-first-task-wait.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
