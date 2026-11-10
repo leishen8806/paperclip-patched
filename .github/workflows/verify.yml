@@ -4,6 +4,23 @@ on:
     branches: [main, task/upgrade-patchset]
   workflow_dispatch:
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: protocol manifest check
+        run: node packages/paperclip-runner/scripts/generate-protocol-manifest.mjs --check
+      - name: full build
+        run: pnpm build
+      - name: server typecheck
+        run: pnpm --filter @paperclipai/server exec tsc --noEmit
   targeted:
     runs-on: ubuntu-latest
     timeout-minutes: 30
