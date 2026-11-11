@@ -1191,6 +1191,12 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         startedAt: input.status === "in_progress" ? now : null,
       },
     ]);
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId,
+      relatedIssueId: openChildTodoId,
+      type: "blocks",
+    });
 
     if (input.activePauseHold) {
       await db.insert(issueTreeHolds).values({
@@ -7434,11 +7440,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     // Original assignee is preserved — no reassignment to a recovery owner.
     expect(umbrella?.assigneeAgentId).toBe(agentId);
 
-    // Only the open children become first-class blockers; the done child is excluded.
+    // A pre-existing parent -> child edge is filtered to avoid creating a cycle;
+    // unrelated open descendants remain blockers.
     const blockers = await sourceBlockerIssueIds(companyId, issueId);
-    expect(blockers.sort()).toEqual(
-      [openChildTodoId, openChildInProgressId].sort(),
-    );
+    expect(blockers).toEqual([openChildInProgressId]);
 
     // No stranded-recovery action/issue is opened for a deliberate wait.
     const recoveryIssues = await selectStrandedRecoveryIssuesForCompany(companyId);

@@ -2940,17 +2940,27 @@ export function recoveryService(
   }
 
   async function openChildIssues(issue: typeof issues.$inferSelect) {
-    return db
-      .select({ id: issues.id, identifier: issues.identifier })
-      .from(issues)
-      .where(
-        and(
-          eq(issues.companyId, issue.companyId),
-          eq(issues.parentId, issue.id),
-          visibleIssueCondition(),
-          notInArray(issues.status, ["done", "cancelled"]),
-        ),
-      );
+    const descendants = [] as Array<{ id: string; identifier: string | null }>;
+    let frontier = [issue.id];
+    const seen = new Set(frontier);
+    while (frontier.length > 0) {
+      const rows = await db
+        .select({ id: issues.id, identifier: issues.identifier })
+        .from(issues)
+        .where(
+          and(
+            eq(issues.companyId, issue.companyId),
+            inArray(issues.parentId, frontier),
+            visibleIssueCondition(),
+            notInArray(issues.status, ["done", "cancelled"]),
+          ),
+        );
+      const next = rows.filter((row) => !seen.has(row.id));
+      next.forEach((row) => seen.add(row.id));
+      descendants.push(...next);
+      frontier = next.map((row) => row.id);
+    }
+    return descendants;
   }
 
   async function healthyOpenChildIssues(issue: typeof issues.$inferSelect, sameWorkspaceOnly = false) {
@@ -2989,10 +2999,22 @@ export function recoveryService(
       existingUnresolvedBlockerIssues(issue.companyId, issue.id),
       openChildIssues(issue),
     ]);
+    const descendantIds = openChildren.map((row) => row.id);
+    const parentBlocksDescendants = descendantIds.length === 0
+      ? new Set<string>()
+      : new Set((await db
+        .select({ relatedIssueId: issueRelations.relatedIssueId })
+        .from(issueRelations)
+        .where(and(
+          eq(issueRelations.companyId, issue.companyId),
+          eq(issueRelations.issueId, issue.id),
+          eq(issueRelations.type, "blocks"),
+          inArray(issueRelations.relatedIssueId, descendantIds),
+        ))).map((row) => row.relatedIssueId));
     const blockedByIssueIds = [
       ...new Set([
         ...existingBlockers.map((row) => row.id),
-        ...openChildren.map((row) => row.id),
+        ...openChildren.filter((row) => !parentBlocksDescendants.has(row.id)).map((row) => row.id),
       ]),
     ];
     if (blockedByIssueIds.length === 0) return null;
