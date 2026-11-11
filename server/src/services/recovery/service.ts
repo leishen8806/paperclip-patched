@@ -4550,6 +4550,7 @@ export function recoveryService(
     }
 
     for (const issue of candidates) {
+      try {
       if (issue.originKind === "chat_channel") {
         await settleSlackConversation(db, issue.companyId, issue.id);
         const [current] = await db.select({ externalConversationState: externalConversationStateSql() })
@@ -5704,6 +5705,10 @@ export function recoveryService(
         }
       } else {
         result.skipped += 1;
+      }
+      } catch (err) {
+        result.skipped += 1;
+        logger.warn({ err, issueId: issue.id }, "recovery candidate failed; skipping candidate");
       }
     }
 
